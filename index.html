@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#050A14" />
+    <title>LeoNet Sentinel</title>
+    <style>
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body, #root { height: 100%; }
+      body {
+        background: #050A14;
+        color: #C8E0F4;
+        font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+        -webkit-font-smoothing: antialiased;
+        overflow-x: hidden;
+      }
+      ::-webkit-scrollbar { width: 4px; height: 4px; }
+      ::-webkit-scrollbar-track { background: #0D1B2A; }
+      ::-webkit-scrollbar-thumb { background: #1E3A5F; border-radius: 2px; }
+      @keyframes pulse-glow { 0%,100%{opacity:1;box-shadow:0 0 8px currentColor} 50%{opacity:0.6;box-shadow:0 0 20px currentColor} }
+      @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+      @keyframes fade-in { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+      @keyframes scan-sweep { 0%{transform:translateX(-100%)} 100%{transform:translateX(400%)} }
+      @keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
