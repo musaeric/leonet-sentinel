@@ -40,6 +40,56 @@ const Badge = ({ label, color }) => (
     borderRadius:10, padding:'2px 8px', textTransform:'uppercase', letterSpacing:1, whiteSpace:'nowrap' }}>{label}</span>
 );
 
+// ── DevTools Guard ─────────────────────────────────────────────────────────────
+// Returns 'null' string for any sensitive field when browser inspect panel is open.
+function useDevToolsGuard() {
+  const [devOpen, setDevOpen] = useState(false);
+  const ref = useRef(false);
+
+  useEffect(() => {
+    const noop = () => {};
+    const orig = {
+      log:   console.log.bind(console),
+      table: console.table.bind(console),
+      dir:   console.dir.bind(console),
+      debug: console.debug.bind(console),
+      group: console.group.bind(console),
+    };
+    console.log = console.table = console.dir = console.debug = console.group = noop;
+
+    const detect = () => {
+      const h = window.outerHeight - window.innerHeight > 150;
+      const w = window.outerWidth  - window.innerWidth  > 150;
+      const detected = h || w;
+      if (detected !== ref.current) {
+        ref.current = detected;
+        setDevOpen(detected);
+        if (detected) {
+          console.clear();
+          orig.log(
+            '%c⛔  LeoNet Sentinel — Unauthorized inspection detected. All sensitive data has been nullified.',
+            'color:#FF2D55;font-size:14px;font-weight:900;padding:12px 16px;background:#050A14;border-left:4px solid #FF2D55'
+          );
+        }
+      }
+    };
+
+    const noCtx = (e) => e.preventDefault();
+    document.addEventListener('contextmenu', noCtx);
+
+    const id = setInterval(detect, 350);
+    detect();
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('contextmenu', noCtx);
+      Object.assign(console, orig);
+    };
+  }, []);
+
+  const mask = useCallback((val) => devOpen ? 'null' : val, [devOpen]);
+  return { devOpen, mask };
+}
+
 // ── NAV ───────────────────────────────────────────────────────────────────────
 const TABS = [
   { id:'overview',    label:'Overview',    icon:'⚡' },
@@ -60,6 +110,7 @@ export default function App() {
   const [toast, setToast]     = useState(null);
   const [scanning, setScanning] = useState(false);
   const [leoNetInput, setLeoNetInput] = useState('');
+  const { devOpen, mask } = useDevToolsGuard();
   const socketRef = useRef(null);
 
   const showToast = (msg, color=D.green) => {
@@ -121,13 +172,13 @@ export default function App() {
           <GlowCard color={D.blue} style={{ padding:24 }}>
             <div style={{ fontSize:13, fontWeight:800, color:D.white, marginBottom:16 }}>💻 System Information</div>
             {[
-              ['Hostname',    sys?.hostname  || '—'],
+              ['Hostname',    mask(sys?.hostname  || '—')],
               ['Platform',    `${sys?.platform||'—'} ${sys?.arch||''}`.trim()],
               ['OS Release',  sys?.release   || '—'],
               ['CPU',         sys?.cpuModel  || '—'],
               ['Load Avg',    sys?.loadAvg?.join(' · ') || '—'],
-              ['Interfaces',  sys?.interfaces?.map(i=>`${i.iface}: ${i.address}`).join(', ') || '—'],
-              ['Agent ID',    cfg.agentId    || '—'],
+              ['Interfaces',  mask(sys?.interfaces?.map(i=>`${i.iface}: ${i.address}`).join(', ') || '—')],
+              ['Agent ID',    mask(cfg.agentId    || '—')],
               ['Last Scan',   data?.lastScan ? new Date(data.lastScan).toLocaleTimeString() : 'Never'],
             ].map(([k,v]) => (
               <div key={k} style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:9, padding:'6px 10px', background:'#081420', borderRadius:6 }}>
@@ -171,7 +222,7 @@ export default function App() {
               </div>
               <div style={{ fontSize:10, color:D.muted }}>
                 {leonet.connected
-                  ? `Streaming threat data to ${cfg.leoNetUrl} · Commands received in real-time`
+                  ? `Streaming threat data to ${mask(cfg.leoNetUrl)} · Commands received in real-time`
                   : 'Configure the LeoNet Defense URL in Settings to enable two-way threat sharing and remote command execution'}
               </div>
             </div>
@@ -260,8 +311,8 @@ export default function App() {
                   <tr key={`${c.local}-${c.remote}-${i}`} style={{ background: c.suspicious ? sevBg(c.threat) : i%2===0?'#0A1828':'#081420', borderBottom:`1px solid ${D.border2}`, boxShadow: c.suspicious ? `inset 3px 0 0 ${sev(c.threat)}` : 'none' }}>
                     <td style={{ padding:'8px 14px', color:D.muted, fontFamily:'monospace', fontSize:10 }}>{c.proto?.toUpperCase()}</td>
                     <td style={{ padding:'8px 14px', color:D.text, fontFamily:'monospace', fontSize:10 }}>{c.local}</td>
-                    <td style={{ padding:'8px 14px', color:c.suspicious?sev(c.threat):c.external?D.cyan:D.muted, fontFamily:'monospace', fontSize:10, fontWeight:c.suspicious?700:400 }}>{c.remote||'*'}</td>
-                    <td style={{ padding:'8px 14px', fontFamily:'monospace', color:D.muted, fontSize:10 }}>{c.remotePort||'—'}</td>
+                    <td style={{ padding:'8px 14px', color:c.suspicious?sev(c.threat):c.external?D.cyan:D.muted, fontFamily:'monospace', fontSize:10, fontWeight:c.suspicious?700:400 }}>{mask(c.remote||'*')}</td>
+                    <td style={{ padding:'8px 14px', fontFamily:'monospace', color:D.muted, fontSize:10 }}>{mask(String(c.remotePort||'—'))}</td>
                     <td style={{ padding:'8px 14px', fontSize:10, color:D.muted }}>{c.state}</td>
                     <td style={{ padding:'8px 14px' }}><Badge label={c.threat} color={sev(c.threat)} /></td>
                     <td style={{ padding:'8px 14px' }}>
@@ -409,17 +460,17 @@ export default function App() {
                 {leonet.connected ? 'Connected — Live data streaming' : 'Not Connected'}
               </span>
             </div>
-            {cfg.leoNetUrl && <div style={{ fontSize:9, color:D.muted, marginTop:6 }}>{cfg.leoNetUrl}</div>}
+            {cfg.leoNetUrl && <div style={{ fontSize:9, color:D.muted, marginTop:6 }}>{mask(cfg.leoNetUrl)}</div>}
           </div>
         </GlowCard>
 
         <GlowCard color={D.purple} style={{ padding:26 }}>
           <div style={{ fontSize:13, fontWeight:800, color:D.white, marginBottom:20 }}>🦁 Agent Identity</div>
           {[
-            ['Agent ID',    cfg.agentId   || '—'],
-            ['Agent Name',  cfg.agentName || '—'],
+            ['Agent ID',    mask(cfg.agentId   || '—')],
+            ['Agent Name',  mask(cfg.agentName || '—')],
             ['Platform',    data?.system?.platform || '—'],
-            ['Hostname',    data?.system?.hostname || '—'],
+            ['Hostname',    mask(data?.system?.hostname || '—')],
             ['Last Scan',   data?.lastScan ? new Date(data.lastScan).toLocaleString() : 'Never'],
             ['Scans Total', String(data?.scanCount || 0)],
           ].map(([k,v]) => (
@@ -470,6 +521,14 @@ export default function App() {
 
   return (
     <div style={{ display:'flex', flexDirection:'column', minHeight:'100vh', background:D.bg }}>
+      {/* DevTools tamper alert */}
+      {devOpen && (
+        <div style={{ position:'fixed', top:0, left:0, right:0, zIndex:99999, background:'#FF2D55', color:'#fff', padding:'10px 20px', display:'flex', alignItems:'center', gap:12, fontSize:12, fontWeight:800, letterSpacing:0.5 }}>
+          <span style={{ fontSize:16 }}>⛔</span>
+          SECURITY ALERT — Inspection panel detected. All sensitive device data has been nullified.
+          <span style={{ marginLeft:'auto', fontSize:11, opacity:0.8 }}>Close DevTools to restore view.</span>
+        </div>
+      )}
       {/* Toast */}
       {toast && (
         <div style={{ position:'fixed', top:16, right:16, zIndex:9999, padding:'12px 20px', background:D.surface, border:`1px solid ${toast.color}66`, borderRadius:10, color:toast.color, fontWeight:700, fontSize:12, boxShadow:`0 4px 24px rgba(0,0,0,0.4)`, animation:'fade-in 0.2s ease', maxWidth:340 }}>
