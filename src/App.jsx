@@ -521,6 +521,10 @@ export default function App() {
 
   return (
     <div style={{ display:'flex', flexDirection:'column', minHeight:'100vh', background:D.bg }}>
+      {/* Watermark logo — fixed, centered, behind all content */}
+      <div style={{ position:'fixed', top:'50%', left:'50%', transform:'translate(-50%,-50%)', pointerEvents:'none', zIndex:0, userSelect:'none' }}>
+        <img src="/logo.jpg" alt="" style={{ width:420, height:420, objectFit:'contain', opacity:0.07, borderRadius:32, filter:'drop-shadow(0 0 40px #FF6B3544)' }} />
+      </div>
       {/* DevTools tamper alert */}
       {devOpen && (
         <div style={{ position:'fixed', top:0, left:0, right:0, zIndex:99999, background:'#FF2D55', color:'#fff', padding:'10px 20px', display:'flex', alignItems:'center', gap:12, fontSize:12, fontWeight:800, letterSpacing:0.5 }}>
