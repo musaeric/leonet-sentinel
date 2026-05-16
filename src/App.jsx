@@ -539,7 +539,10 @@ export default function App() {
       {/* Top bar */}
       <div style={{ background:D.surface, borderBottom:`1px solid ${D.border}`, padding:'0 20px', display:'flex', alignItems:'center', justifyContent:'space-between', height:56, flexShrink:0 }}>
         <div style={{ display:'flex', alignItems:'center', gap:14 }}>
-          <span style={{ fontSize:18, fontWeight:900, color:D.cyan, letterSpacing:-0.5 }}>🦁 LeoNet <span style={{ color:D.orange }}>Sentinel</span></span>
+          <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+            <img src="/logo.jpg" alt="LeoNet Sentinel" style={{ width:34, height:34, borderRadius:8, objectFit:'cover', boxShadow:`0 0 14px ${D.orange}88` }} />
+            <span style={{ fontSize:18, fontWeight:900, color:D.cyan, letterSpacing:-0.5 }}>LeoNet <span style={{ color:D.orange }}>Sentinel</span></span>
+          </div>
           <span style={{ fontSize:10, color:D.muted, background:'#1A3A5F', padding:'2px 8px', borderRadius:10 }}>DEVICE AGENT</span>
         </div>
 
