@@ -110,6 +110,7 @@ export default function App() {
   const [toast, setToast]     = useState(null);
   const [scanning, setScanning] = useState(false);
   const [leoNetInput, setLeoNetInput] = useState('');
+  const [apiKeyInput, setApiKeyInput] = useState('');
   const { devOpen, mask } = useDevToolsGuard();
   const socketRef = useRef(null);
 
@@ -146,7 +147,7 @@ export default function App() {
   };
 
   const saveLeoNet = () => {
-    socketRef.current?.emit('set-config', { leoNetUrl: leoNetInput });
+    socketRef.current?.emit('set-config', { leoNetUrl: leoNetInput, ...(apiKeyInput ? { apiKey: apiKeyInput } : {}) });
     showToast('🔗 LeoNet Defense URL saved. Connecting…', D.blue);
   };
 
@@ -447,6 +448,14 @@ export default function App() {
             <div style={{ fontSize:9, color:D.muted, marginTop:5 }}>Your deployed LeoNet Defense URL</div>
           </div>
 
+          <div style={{ marginBottom:16 }}>
+            <div style={{ fontSize:10, color:D.muted, fontWeight:700, marginBottom:6, textTransform:'uppercase', letterSpacing:1 }}>Sentinel Shared Key</div>
+            <input type="password" value={apiKeyInput} onChange={e=>setApiKeyInput(e.target.value)}
+              placeholder="Same key set as SENTINEL_SHARED_KEY on LeoNet Defense"
+              style={{ width:'100%', padding:'10px 14px', background:'#081420', border:`1px solid ${D.border}`, borderRadius:8, color:D.white, fontSize:12, outline:'none', boxSizing:'border-box' }} />
+            <div style={{ fontSize:9, color:D.muted, marginTop:5 }}>Required — without it, LeoNet Defense rejects this agent's reports and commands. Never echoed back once saved.</div>
+          </div>
+
           <button onClick={saveLeoNet}
             style={{ width:'100%', padding:'12px', borderRadius:10, border:'none', background:`linear-gradient(135deg,${D.blue},${D.cyan})`, color:'#fff', fontWeight:800, fontSize:13, cursor:'pointer' }}>
             💾 Save &amp; Connect
@@ -492,7 +501,7 @@ export default function App() {
         {[
           ['Desktop App',   'Double-click LeoNet Sentinel to launch. Runs in system tray. Dashboard opens at localhost:3001'],
           ['Headless Mode', 'Run: node server/index.js — then open http://localhost:3001 in any browser on the device'],
-          ['Connect',       'Set LEONET_URL=https://leonet-defense.vercel.app and enter it in the field above'],
+          ['Connect',       'Set LEONET_URL and LEONET_KEY (or enter them in the fields above) — both are required to authenticate with LeoNet Defense'],
           ['Mitigations',   'LeoNet Defense sends Kill/Block/Isolate commands to this Sentinel in real-time'],
           ['Scans',         'Every 10 seconds: process table, netstat, CPU/memory — threats auto-push to LeoNet Defense'],
         ].map(([step, desc]) => (

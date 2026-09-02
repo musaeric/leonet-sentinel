@@ -328,7 +328,8 @@ async function executeCommand(cmd) {
 
   if (cfg.leoNetUrl) {
     const axios = require('axios');
-    axios.post(`${cfg.leoNetUrl}/api/sentinel/mitigation`, { agentId: cfg.agentId, ...result }).catch(() => {});
+    axios.post(`${cfg.leoNetUrl}/api/sentinel/mitigation`, { agentId: cfg.agentId, ...result },
+      { timeout: 8000, headers: cfg.apiKey ? { 'x-api-key': cfg.apiKey } : {} }).catch(() => {});
   }
   return result;
 }
