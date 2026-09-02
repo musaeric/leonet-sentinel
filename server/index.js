@@ -6,9 +6,10 @@ const http     = require('http');
 const { Server } = require('socket.io');
 const { exec } = require('child_process');
 const { promisify } = require('util');
-const os   = require('os');
-const path = require('path');
-const fs   = require('fs');
+const os     = require('os');
+const path   = require('path');
+const fs     = require('fs');
+const crypto = require('crypto');
 
 const execAsync = promisify(exec);
 const app        = express();
@@ -60,6 +61,115 @@ const BAD_IP_RANGES = [
   '5.188.', '195.123.', '176.119.', '198.251.',
   '193.32.', '80.82.', '89.248.',
 ];
+
+// ── File Reputation (VirusTotal, via the LeoNet Defense bridge) ─────────────────
+// The BAD_PROCS list above is a name match — trivially defeated by renaming
+// a binary, and prone to false-flagging legitimate security tools (hashcat,
+// hydra) a professional user might genuinely be running. For processes that
+// already tripped a local heuristic (name match or high CPU), this hashes
+// the actual executable and checks that hash's reputation against
+// VirusTotal's 70+ engine database via LeoNet Defense's authenticated
+// /api/scan/filehash bridge — only the hash leaves this device, never the
+// file. A confirmed-malicious hash escalates severity to critical; a
+// confirmed-clean hash (many engines, zero detections) downgrades a CPU-only
+// flag, but never a name-list match — VT can't tell "malware" from "a real
+// copy of a dual-use tool," so a name hit stays as a name hit regardless.
+const reputationCache       = new Map(); // sha256 -> { result, at }
+const REPUTATION_CACHE_MS   = 10 * 60 * 1000;
+const MAX_HASH_CHECKS_PER_SCAN = 5;      // bound worst-case scan latency + VT free-tier rate limit
+
+async function getExecutablePath(pid) {
+  try {
+    if (process.platform === 'linux') {
+      const { stdout } = await execAsync(`readlink -f /proc/${pid}/exe`, { timeout: 3000 });
+      const p = stdout.trim();
+      return p || null;
+    }
+    if (process.platform === 'darwin') {
+      // `ps -o comm=` only reports an absolute path when argv[0] itself was
+      // absolute (true for login shells, false for anything launched via a
+      // bare command name resolved through PATH, e.g. `node ...`) — lsof's
+      // "txt" (text segment) entry is the actual loaded binary regardless
+      // of how the process was invoked.
+      const { stdout } = await execAsync(
+        `lsof -p ${pid} 2>/dev/null | awk '$4=="txt"{print $9; exit}'`, { timeout: 3000 });
+      const p = stdout.trim();
+      return p.startsWith('/') ? p : null;
+    }
+    if (process.platform === 'win32') {
+      const { stdout } = await execAsync(`wmic process where ProcessId=${pid} get ExecutablePath /format:list`, { timeout: 5000 });
+      const m = stdout.match(/ExecutablePath=(.+)/i);
+      return m ? m[1].trim() : null;
+    }
+  } catch { /* process exited, permission denied, or platform quirk — skip */ }
+  return null;
+}
+
+function hashFile(filePath) {
+  return new Promise((resolve) => {
+    try {
+      const hash   = crypto.createHash('sha256');
+      const stream = fs.createReadStream(filePath);
+      stream.on('data',  d => hash.update(d));
+      stream.on('end',   () => resolve(hash.digest('hex')));
+      stream.on('error', () => resolve(null));
+    } catch { resolve(null); }
+  });
+}
+
+async function checkFileReputation(hash) {
+  if (!cfg.leoNetUrl || !cfg.apiKey) return null;
+  const cached = reputationCache.get(hash);
+  if (cached && (Date.now() - cached.at) < REPUTATION_CACHE_MS) return cached.result;
+  try {
+    const axios = require('axios');
+    const r = await axios.post(`${cfg.leoNetUrl}/api/scan/filehash`, { hash },
+      { timeout: 10000, headers: { 'x-api-key': cfg.apiKey } });
+    reputationCache.set(hash, { result: r.data, at: Date.now() });
+    return r.data;
+  } catch { return null; }
+}
+
+function verdictFromReputation(rep) {
+  if (!rep || rep.setupRequired || rep.error) return { verdict: 'unknown', note: null };
+  if (!rep.found) return { verdict: 'unknown', note: 'Unknown to VirusTotal (not previously seen).' };
+  const s = rep.stats || {};
+  const malicious     = (s.malicious || 0) + (s.suspicious || 0);
+  const totalScanned  = malicious + (s.harmless || 0) + (s.undetected || 0);
+  if (malicious > 0) {
+    return { verdict: 'malicious', note: `🔴 Confirmed malicious by VirusTotal: ${malicious}/${totalScanned} engines flagged this file.` };
+  }
+  if (totalScanned >= 10) {
+    return { verdict: 'clean', note: `✅ VirusTotal: clean across ${totalScanned} engines.` };
+  }
+  return { verdict: 'unknown', note: 'VirusTotal has limited data on this file.' };
+}
+
+async function enrichProcessesWithReputation(processes) {
+  if (!cfg.leoNetUrl || !cfg.apiKey) return;
+  const candidates = processes.filter(p => p.suspicious).slice(0, MAX_HASH_CHECKS_PER_SCAN);
+  if (candidates.length === 0) return;
+
+  await Promise.all(candidates.map(async (p) => {
+    const filePath = await getExecutablePath(p.pid);
+    if (!filePath) return;
+    const hash = await hashFile(filePath);
+    if (!hash) return;
+    const rep = await checkFileReputation(hash);
+    const { verdict, note } = verdictFromReputation(rep);
+    if (!note) return;
+    p.reputation = { hash, verdict, note };
+
+    const nameMatched = BAD_PROCS.some(b => p.name.toLowerCase().includes(b));
+    if (verdict === 'malicious') {
+      p.threat = 'critical';
+      p.suspicious = true;
+    } else if (verdict === 'clean' && !nameMatched) {
+      if (p.threat === 'critical')    p.threat = 'medium';
+      else if (p.threat === 'high')   p.threat = 'low';
+    }
+  }));
+}
 
 // ── System Info ───────────────────────────────────────────────────────────────
 async function getSystemInfo() {
@@ -178,7 +288,7 @@ function detectThreats(system, processes, connections) {
         type: 'Suspicious Process',
         severity: p.threat,
         name: p.name,
-        details: `PID ${p.pid} | CPU ${p.cpu}% | Mem ${p.mem}MB`,
+        details: `PID ${p.pid} | CPU ${p.cpu}% | Mem ${p.mem}MB${p.reputation ? ' | ' + p.reputation.note : ''}`,
         source: 'Process Monitor',
         timestamp: now,
         mitigated: false,
@@ -235,16 +345,22 @@ function detectThreats(system, processes, connections) {
 }
 
 // ── Main Scan ─────────────────────────────────────────────────────────────────
+let scanInFlight = false;
+
 async function runScan() {
+  if (scanInFlight) return; // reputation lookups can outrun the 10s interval; never overlap scans
+  scanInFlight = true;
   try {
     const [system, processes, connections] = await Promise.all([
       getSystemInfo(), getProcessList(), getNetworkConnections(),
     ]);
+    await enrichProcessesWithReputation(processes);
     const threats = detectThreats(system, processes, connections);
     state = { ...state, system, processes, connections, threats, lastScan: new Date().toISOString(), scanCount: state.scanCount + 1 };
     io.emit('update', state);
     if (cfg.leoNetUrl) pushToLeoNet().catch(() => {});
   } catch (e) { console.error('[Sentinel] Scan error:', e.message); }
+  finally { scanInFlight = false; }
 }
 
 // ── LeoNet Defense Bridge ─────────────────────────────────────────────────────
