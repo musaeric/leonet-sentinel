@@ -276,8 +276,150 @@ function parseConnections(stdout) {
     }).filter(c => c.local && c.local !== '*').slice(0, 40);
 }
 
+// ── Resource Anomaly Baseline ─────────────────────────────────────────────────
+// A fixed "CPU > 85%" threshold either misses everything on a quiet machine
+// or fires every single scan forever on one that's legitimately, consistently
+// busy (video editing, compiling, a real workload) — exactly the false-alarm
+// pattern that gets a security tool ignored or disabled. This tracks a
+// rolling baseline of THIS machine's own recent usage and flags a sudden
+// deviation from it instead of an absolute number, so a busy-but-steady
+// machine stays quiet while a spike from a quiet baseline still gets caught.
+const RESOURCE_HISTORY_LEN     = 30; // ~5 min of samples at 10s/scan
+const MIN_HISTORY_FOR_BASELINE = 6;  // don't judge "normal" from under ~1 min of data
+const ANOMALY_STREAK_REQUIRED  = 2;  // require 2 consecutive anomalous scans — filters one-off transient spikes (e.g. launching an app)
+const CPU_ABS_FLOOR  = 75; // still require a meaningfully high absolute value, not just "any deviation"
+const MEM_ABS_FLOOR  = 85;
+const CPU_DEVIATION_PTS = 35; // percentage points above rolling baseline to count as a spike
+const MEM_DEVIATION_PTS = 30;
+
+const cpuHistory = [];
+const memHistory = [];
+let cpuAnomalyStreak = 0;
+let memAnomalyStreak = 0;
+
+function rollingAvg(arr) {
+  return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+}
+
+// Checks `current` against the rolling baseline BEFORE folding it into the
+// history, so a sustained high value gets caught up in its own baseline on
+// subsequent scans (stops re-alerting) while a genuine spike from a lower
+// baseline is still visible when it first happens.
+function checkResourceAnomaly(current, history, absFloor, deviationPts) {
+  let anomaly = false;
+  let baseline = null;
+  if (history.length >= MIN_HISTORY_FOR_BASELINE) {
+    baseline = rollingAvg(history);
+    anomaly = current >= absFloor && (current - baseline) >= deviationPts;
+  }
+  history.push(current);
+  if (history.length > RESOURCE_HISTORY_LEN) history.shift();
+  return { anomaly, baseline };
+}
+
+// ── Persistence / Autostart Monitoring ────────────────────────────────────────
+// One of the most reliable indicators of compromise in real EDR products:
+// malware wants to survive a reboot, so it almost always installs itself
+// somewhere that runs automatically. Rather than just listing everything in
+// these locations (mostly legitimate noise — Dropbox, Zoom, your own login
+// items), this diffs against what was already there and flags only NEW
+// entries, for a limited window after they first appear.
+const KNOWN_PERSISTENCE = new Map(); // "location::name" -> firstSeenAt ms (0 = pre-existing baseline, never flagged)
+let persistenceBaselined = false;
+const PERSISTENCE_FLAG_WINDOW_MS = 24 * 60 * 60 * 1000; // keep surfacing a new entry for 24h after first seen
+
+async function getPersistenceEntries() {
+  const entries = [];
+  try {
+    if (process.platform === 'darwin') {
+      const home = os.homedir();
+      const dirs = [
+        [`${home}/Library/LaunchAgents`, 'LaunchAgent (user)'],
+        ['/Library/LaunchAgents',        'LaunchAgent (system)'],
+        ['/Library/LaunchDaemons',       'LaunchDaemon (system)'],
+      ];
+      for (const [dirPath, label] of dirs) {
+        if (!fs.existsSync(dirPath)) continue;
+        for (const f of fs.readdirSync(dirPath)) {
+          if (f.endsWith('.plist')) entries.push({ location: label, name: f });
+        }
+      }
+      try {
+        // Requires Automation permission for System Events on first use —
+        // if denied, this just contributes nothing rather than failing the scan.
+        const { stdout } = await execAsync(
+          `osascript -e 'tell application "System Events" to get the name of every login item'`,
+          { timeout: 4000 });
+        stdout.split(',').map(s => s.trim()).filter(Boolean)
+          .forEach(name => entries.push({ location: 'Login Item', name }));
+      } catch { /* permission not granted, or none configured */ }
+    } else if (process.platform === 'linux') {
+      const home = os.homedir();
+      try {
+        const { stdout } = await execAsync('crontab -l', { timeout: 3000 });
+        stdout.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'))
+          .forEach(line => entries.push({ location: 'crontab', name: line.slice(0, 80) }));
+      } catch { /* no crontab for this user */ }
+      const autoDir = `${home}/.config/autostart`;
+      if (fs.existsSync(autoDir)) {
+        for (const f of fs.readdirSync(autoDir)) {
+          if (f.endsWith('.desktop')) entries.push({ location: 'autostart', name: f });
+        }
+      }
+    } else if (process.platform === 'win32') {
+      try {
+        const { stdout } = await execAsync(
+          'reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"', { timeout: 4000 });
+        stdout.split('\n')
+          .map(l => l.trim())
+          .filter(l => l && !l.startsWith('HKEY') && !l.startsWith('!'))
+          .forEach(line => {
+            const name = line.split(/\s{2,}/)[0]?.trim();
+            if (name) entries.push({ location: 'Registry Run (user)', name });
+          });
+      } catch { /* key doesn't exist or reg unavailable */ }
+    }
+  } catch { /* never let persistence checks break the scan */ }
+  return entries;
+}
+
+function detectPersistenceThreats(entries) {
+  const now = Date.now();
+  const currentKeys = new Set(entries.map(e => `${e.location}::${e.name}`));
+  const threats = [];
+
+  if (!persistenceBaselined) {
+    // First scan ever: accept whatever's already installed as the known
+    // baseline — don't flag every pre-existing login item as if it just
+    // appeared the moment Sentinel started watching.
+    for (const key of currentKeys) KNOWN_PERSISTENCE.set(key, 0);
+    persistenceBaselined = true;
+    return threats;
+  }
+
+  for (const e of entries) {
+    const key = `${e.location}::${e.name}`;
+    if (!KNOWN_PERSISTENCE.has(key)) KNOWN_PERSISTENCE.set(key, now);
+    const firstSeenAt = KNOWN_PERSISTENCE.get(key);
+    if (firstSeenAt > 0 && (now - firstSeenAt) < PERSISTENCE_FLAG_WINDOW_MS) {
+      threats.push({
+        id: `PERSIST-${key.replace(/[^a-z0-9]/gi, '-')}`,
+        type: 'New Persistence Entry',
+        severity: 'high',
+        name: e.name,
+        details: `New autostart entry in ${e.location}, first seen ${new Date(firstSeenAt).toLocaleString()}. Malware commonly installs itself here to survive a reboot — verify this is something you installed.`,
+        source: 'Persistence Monitor',
+        timestamp: new Date(firstSeenAt).toISOString(),
+        mitigated: false,
+        action: null, // no safe generic auto-removal — a wrong guess here breaks real software; surfaced for manual review only
+      });
+    }
+  }
+  return threats;
+}
+
 // ── Threat Detection Engine ───────────────────────────────────────────────────
-function detectThreats(system, processes, connections) {
+function detectThreats(system, processes, connections, persistenceEntries) {
   const threats = [];
   const now     = new Date().toISOString();
 
@@ -313,33 +455,41 @@ function detectThreats(system, processes, connections) {
     }
   }
 
-  if (system?.cpuPct > 85) {
-    threats.push({
-      id: 'SYS-CPU',
-      type: 'High CPU Anomaly',
-      severity: 'medium',
-      name: `CPU at ${system.cpuPct}%`,
-      details: `Load: ${system.loadAvg?.join(', ')}. Possible cryptominer or C2 beacon.`,
-      source: 'System Monitor',
-      timestamp: now,
-      mitigated: false,
-      action: null,
-    });
+  if (system) {
+    const cpuCheck = checkResourceAnomaly(system.cpuPct, cpuHistory, CPU_ABS_FLOOR, CPU_DEVIATION_PTS);
+    cpuAnomalyStreak = cpuCheck.anomaly ? cpuAnomalyStreak + 1 : 0;
+    if (cpuAnomalyStreak >= ANOMALY_STREAK_REQUIRED) {
+      threats.push({
+        id: 'SYS-CPU',
+        type: 'CPU Usage Anomaly',
+        severity: (system.cpuPct - cpuCheck.baseline) >= 55 ? 'high' : 'medium',
+        name: `CPU at ${system.cpuPct}% (this device's recent baseline: ~${Math.round(cpuCheck.baseline)}%)`,
+        details: `Sudden spike well above this machine's own recent normal — possible cryptominer or C2 beacon. A machine that's consistently busy won't trigger this; it's a change from THIS device's baseline, not a fixed number.`,
+        source: 'System Monitor',
+        timestamp: now,
+        mitigated: false,
+        action: null,
+      });
+    }
+
+    const memCheck = checkResourceAnomaly(system.memPct, memHistory, MEM_ABS_FLOOR, MEM_DEVIATION_PTS);
+    memAnomalyStreak = memCheck.anomaly ? memAnomalyStreak + 1 : 0;
+    if (memAnomalyStreak >= ANOMALY_STREAK_REQUIRED) {
+      threats.push({
+        id: 'SYS-MEM',
+        type: 'Memory Usage Anomaly',
+        severity: (system.memPct - memCheck.baseline) >= 40 ? 'high' : 'medium',
+        name: `Memory at ${system.memPct}% (this device's recent baseline: ~${Math.round(memCheck.baseline)}%)`,
+        details: `Sudden spike well above this machine's own recent normal — possible DoS condition, ransomware encryption, or memory scraper.`,
+        source: 'System Monitor',
+        timestamp: now,
+        mitigated: false,
+        action: null,
+      });
+    }
   }
 
-  if (system?.memPct > 92) {
-    threats.push({
-      id: 'SYS-MEM',
-      type: 'Memory Exhaustion',
-      severity: 'medium',
-      name: `Memory at ${system.memPct}%`,
-      details: 'Possible DoS condition, ransomware encryption, or memory scraper active.',
-      source: 'System Monitor',
-      timestamp: now,
-      mitigated: false,
-      action: null,
-    });
-  }
+  for (const pe of detectPersistenceThreats(persistenceEntries || [])) threats.push(pe);
 
   return threats;
 }
@@ -351,11 +501,11 @@ async function runScan() {
   if (scanInFlight) return; // reputation lookups can outrun the 10s interval; never overlap scans
   scanInFlight = true;
   try {
-    const [system, processes, connections] = await Promise.all([
-      getSystemInfo(), getProcessList(), getNetworkConnections(),
+    const [system, processes, connections, persistenceEntries] = await Promise.all([
+      getSystemInfo(), getProcessList(), getNetworkConnections(), getPersistenceEntries(),
     ]);
     await enrichProcessesWithReputation(processes);
-    const threats = detectThreats(system, processes, connections);
+    const threats = detectThreats(system, processes, connections, persistenceEntries);
     state = { ...state, system, processes, connections, threats, lastScan: new Date().toISOString(), scanCount: state.scanCount + 1 };
     io.emit('update', state);
     if (cfg.leoNetUrl) pushToLeoNet().catch(() => {});
